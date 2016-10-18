@@ -1,0 +1,52 @@
+#!/bin/sh
+set -x
+
+if [ $# -ne 2 ]; then
+  echo "Usage: ./switchover.sh oldmaster newmaster"
+  exit 1
+fi
+OldMaster=$1
+NewMaster=$2
+
+# Switch current master to OFFLINE_SOFT so no further connections will be routed to it. Keep currently opened connections open.
+(
+echo "UPDATE mysql_servers SET STATUS='OFFLINE_SOFT' WHERE hostname=\"$OldMaster\" AND hostgroup_id=0;"
+echo "LOAD MYSQL SERVERS TO RUNTIME;"
+) | mysql -u admin -padmin -h 127.0.0.1 -P6032
+
+# Check number of opened connections to current master.
+CONNUSED=`mysql -h 127.0.0.1 -P6032 -uadmin -padmin -e 'SELECT IFNULL(SUM(ConnUsed),0) FROM stats_mysql_connection_pool WHERE status="OFFLINE_SOFT" AND hostgroup=0' -B -N 2> /dev/null`
+
+# Wait a bit (20x0.05s = 1s) for connections to close. 1s is good for POC with sysbench. We may want to be more generous
+TRIES=0
+while [ $CONNUSED -ne 0 -a $TRIES -ne 20 ]
+do
+  CONNUSED=`mysql -h 127.0.0.1 -P6032 -uadmin -padmin -e 'SELECT IFNULL(SUM(ConnUsed),0) FROM stats_mysql_connection_pool WHERE status="OFFLINE_SOFT" AND hostgroup=0' -B -N 2> /dev/null`
+  TRIES=$(($TRIES+1))
+  if [ $CONNUSED -ne "0" ]; then
+    sleep 0.05
+  fi
+done
+
+# If there are no open connections or we tried more than 20 times, perform a master switch anyway
+
+masterha_master_switch --master_state=alive --conf=/etc/app1.cnf --orig_master_is_new_slave --interactive=0 --running_updates_limit=0
+
+
+# This is enough if we have mysql_replication_hostgroups table configured and switchover software
+# (MHA master_ip_online_change_script=/root/mha4mysql-manager/samples/scripts/master_ip_online_change in this case) manages read_only flags.
+(
+echo "UPDATE mysql_servers SET STATUS='ONLINE', hostgroup_id=1 WHERE hostname=\"$OldMaster\";"
+echo "LOAD MYSQL SERVERS TO RUNTIME;"
+) | mysql -u admin -padmin -h 127.0.0.1 -P6032
+
+# We could also skip mysql_replication_hostgroups completely and manage hosts manually.
+# Something like below should disable old master, make it a reader and configure new master as a writer.
+# More complex scenarios can also be handled manually (ie. new writer also becomes a reader)
+
+#(
+#echo "UPDATE mysql_servers SET STATUS='ONLINE', hostgroup_id=1 WHERE hostname=\"$OldMaster\" AND hostgroup_id=0;"
+#echo "UPDATE mysql_servers SET hostgroup_id=0 WHERE hostname=\"$NewMaster\" AND hostgroup_id=1;"
+#echo "LOAD MYSQL SERVERS TO RUNTIME;"
+#) | mysql -u admin -padmin -h 127.0.0.1 -P6032
+

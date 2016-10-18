@@ -1,0 +1,726 @@
+-   name: Setup CC
+
+    hosts: cmon
+    remote_user: vagrant
+    become: yes
+    gather_facts: false
+
+    tasks:
+
+    -   name: Download Severalnines repository key
+        action: command wget http://repo.severalnines.com/severalnines-repos.asc -O /root/severalnines-repos.asc
+
+    -   name: Add Severalnines repository key
+        action: command sudo apt-key add /root/severalnines-repos.asc
+
+    -   name: Create /etc/apt/sources.list.d/s9s-repo.list
+        lineinfile: dest=/etc/apt/sources.list.d/s9s-repo.list regexp='^deb' line='deb [arch=amd64] http://repo.severalnines.com/deb ubuntu main' create=yes mode=644 state=present
+
+    -   name: Install ClusterControl
+        apt: pkg=clustercontrol state=latest install_recommends=no update_cache=yes
+        register: result
+
+    -   name: Add exit 0 to the script
+        lineinfile: dest=/var/www/clustercontrol/app/tools/setup-cc.sh regexp='nonexiting regular expression' line='exit 0' create=yes mode=755 state=present
+
+    -   name: Setup ClusterControl
+        action: command /var/www/clustercontrol/app/tools/setup-cc.sh
+        environment:
+            S9S_CMON_PASSWORD: cmon
+            S9S_ROOT_PASSWORD: pass
+            S9S_DB_PORT: 3306
+        when: result|changed
+
+    -   name: Install bc
+        apt: pkg=bc state=latest install_recommends=no
+
+-   name: Setup SSH connectivity
+    hosts: cmon, galera
+    remote_user: vagrant
+    become: yes
+    gather_facts: false
+
+    tasks:
+    -   name: Change source.list
+        replace: dest=/etc/apt/sources.list regexp='(\s+)us\.(\s+.*)?$' replace='\1pl.\2'
+    -   name: Install vim
+        apt: pkg=vim state=latest install_recommends=no  update_cache=yes
+    -   name: Install ifstat
+        apt: pkg=ifstat state=latest install_recommends=no
+    -   name: Set up SSH key
+        file: path=/root/.ssh owner=root group=root state=directory
+    -   name: Set up private SSH key
+        template: src=./templates/id_rsa.j2 dest=/root/.ssh/id_rsa
+    -   name: Set up public SSH key
+        template: src=./templates/id_rsa.pub.j2 dest=/root/.ssh/id_rsa.pub
+    -   name: Fix permissions /root/.ssh/authorized_keys
+        file: path=/root/.ssh/authorized_keys owner=root group=root mode=600 state=touch
+    -   name: Setup authorized hosts
+        action: command cp /root/.ssh/id_rsa.pub /root/.ssh/authorized_keys
+    -   name: Fix permissions /root/.ssh/authorized_keys
+        file: path=/root/.ssh/authorized_keys owner=root group=root mode=600 state=file
+    -   name: Fix permissions /root/.ssh/id_rsa
+        file: path=/root/.ssh/id_rsa owner=root group=root mode=600 state=file
+
+
+
+
+-   name: Populate mysql_nodes group
+
+    hosts: db
+    remote_user: vagrant
+    become: yes
+    gather_facts: true
+    serial: 1
+
+    tasks:
+
+
+    - debug: msg="1 {{ ansible_eth1['ipv4']['address'] }}"
+    - add_host: name={{ ansible_eth1['ipv4']['address'] }} groups=mysql_nodes
+    - debug: msg="nodes {{ groups['mysql_nodes'] }}"
+
+-   name: Configure servers
+    hosts: db
+    remote_user: vagrant
+    become: yes
+    gather_facts: false
+
+    tasks:
+
+#    -   name: Add Percona repository
+#        action: command apt-key adv --keyserver keys.gnupg.net --recv-keys 1C4CBDCDCD2EFD2A
+
+    -   name: Get Ubuntu version
+        shell: grep main /etc/apt/sources.list | grep -v \# | grep -v "\-security" | grep -v "\-updates" | awk '{print $3}' | uniq
+        register: ubuntu_version
+
+    -   name: Ensure deb entry is in place
+        lineinfile: dest=/etc/apt/sources.list regexp='^deb http://repo.percona.com' line='deb http://repo.percona.com/apt {{ ubuntu_version['stdout_lines'][0] }} main'
+
+    -   name: Ensure deb-src entry is in place
+        lineinfile: dest=/etc/apt/sources.list regexp='^deb-src http://repo.percona.com' line='deb-src http://repo.percona.com/apt {{ ubuntu_version['stdout_lines'][0] }} main'
+
+    -   name: Ensure /etc/mysql/ exists
+        file: path=/etc/mysql state=directory mode=755
+
+    -   name: Check available memory on the host
+        shell: "free -m | grep Mem: | awk '{print $2}'"
+        register: memory
+
+    -   name: Get local IP of the host
+        shell: ip a | grep eth0 | grep inet | awk '{print $2}' | cut -d / -f 1
+        register: ipaddress
+
+
+
+    -   name: Create my.cnf from template
+        template: src=./templates/my.cnf_small.j2 dest=/etc/mysql/my.cnf owner=root group=root mode=0644
+
+    -   name: Generate random server_id
+        lineinfile: dest=/etc/mysql/my.cnf regexp='server_id = [0-9]+.*' line='server_id = {{ 999999|random }}'
+
+    -   name: Install Percona Server 5.6
+        apt: pkg=percona-server-server-5.6 state=latest install_recommends=no update_cache=yes force=yes
+        register: installed
+
+    -   name: Install python-mysqldb
+        apt: pkg=python-mysqldb state=latest install_recommends=no
+
+#    -   name: Create user
+#        mysql_user: name=root host=% password=pass priv="*.*:ALL,GRANT" state=present
+#        when: installed|changed
+
+#    -   name: Create /root/.my.cnf from template
+#        template: src=./templates/.my.cnf.j2 dest=/root/.my.cnf owner=root group=root mode=600
+
+    -   name: Restart MySQL
+        service: name=mysql state=restarted
+
+-   name: Setup nodes
+    hosts: db
+    remote_user: vagrant
+    become: yes
+    gather_facts: false
+
+    tasks:
+
+    -   name: Install vim
+        apt: pkg=vim state=latest install_recommends=no  update_cache=yes
+
+    -   name: Install ifstat
+        apt: pkg=ifstat state=latest install_recommends=no
+
+    -   name: Install python-mysqldb
+        apt: pkg=python-mysqldb state=latest install_recommends=no
+
+    -   name: Install libdbi-perl
+        apt: pkg=libdbi-perl state=latest install_recommends=no
+
+
+    -   name: Install libdbd-mysql-perl
+        apt: pkg=libdbd-mysql-perl state=latest install_recommends=no
+
+    -   name: Set up SSH key
+        file: path=/root/.ssh owner=root group=root state=directory
+
+    -   name: Set up private SSH key
+        template: src="./templates/id_rsa.j2" dest=/root/.ssh/id_rsa
+
+    -   name: Set up public SSH key
+        template: src="./templates/id_rsa.pub.j2" dest=/root/.ssh/id_rsa.pub
+
+    -   name: Fix permissions /root/.ssh/authorized_keys
+        file: path=/root/.ssh/authorized_keys owner=root group=root mode=600 state=touch
+
+    -   name: Setup authorized hosts
+        action: command cp /root/.ssh/id_rsa.pub /root/.ssh/authorized_keys
+
+    -   name: Fix permissions /root/.ssh/authorized_keys
+        file: path=/root/.ssh/authorized_keys owner=root group=root mode=600 state=file
+
+    -   name: Fix permissions /root/.ssh/id_rsa
+        file: path=/root/.ssh/id_rsa owner=root group=root mode=600 state=file
+
+
+# Get master coordinates
+
+-   name: Get coordinates from master
+    hosts: master
+    become: yes
+    remote_user: vagrant
+    gather_facts: true
+
+    tasks:
+
+
+    -   add_host: name={{ ansible_eth1['ipv4']['address'] }} groups=mysql_master
+
+    -   name: Install libdbd-mysql-perl
+        apt: pkg=libdbd-mysql-perl state=latest install_recommends=no update_cache=yes
+        when: ansible_os_family == "Debian"
+
+
+
+    -   name: Install python-mysqldb
+        apt: pkg=python-mysqldb state=latest install_recommends=no
+
+    -   name: Create replication user
+        mysql_user: name=repl host=% password=ication priv="*.*:REPLICATION CLIENT,REPLICATION SLAVE" state=present
+        register: repuser
+
+    -   name: Create user
+        mysql_user: name=root host=% password=pass priv="*.*:ALL,GRANT" state=present
+        when: repuser|changed
+
+    -   name: Remove all root users
+        mysql_user: name=root host=precise64 state=absent
+        when: repuser|changed
+
+    -   name: Remove all root users
+        mysql_user: name=root host=127.0.0.1 state=absent
+        when: repuser|changed
+
+    -   name: Remove all root users
+        mysql_user: name=root host='::1' state=absent
+        when: repuser|changed
+
+    -   name: Remove anonymous users
+        mysql_user: name='' state=absent
+        when: repuser|changed
+
+    -   name: Remove anonymous users
+        mysql_user: name='' host=precise state=absent
+        when: repuser|changed
+
+    -   name: Create user
+        mysql_user: name=root host=localhost password=pass priv="*.*:ALL,GRANT" state=present
+        when: repuser|changed
+
+    -   name: Create /root/.my.cnf from template
+        template: src=./templates/.my.cnf.j2 dest=/root/.my.cnf owner=root group=root mode=600
+
+    -   name: Create cmon user
+        mysql_user: name=cmon host=% password=secretpass priv="*.*:ALL,GRANT" state=present
+        when: repuser|changed
+
+    -   name: Create monuser user
+        mysql_user: name=monuser host=% password=monpass priv="*.*:ALL" state=present
+        when: repuser|changed
+
+    -   name: Create monitor user
+        mysql_user: name=monitor host=% password=monitor priv="*.*:REPLICATION CLIENT" state=present
+        when: repuser|changed
+
+    -   name: Create cmon user
+        mysql_user: name=cmon host="10.0.0.200" password=cmon priv="*.*:ALL" state=present
+        when: repuser|changed
+
+    -   name: Create sbtest schema
+        mysql_db: name=sbtest state=present
+        when: repuser|changed
+
+    -   name: Create sbtest user
+        mysql_user: name=sbtest host=% password=sbtest priv="sbtest.*:ALL" state=present
+        when: repuser|changed
+
+# Setup replication on the slave
+
+-   name: Setup replication on the slave
+    hosts: slave
+    become: yes
+    remote_user: vagrant
+    gather_facts: true
+
+    vars:
+
+#      login_host: localhost
+#      login_user: root
+#      login_password:
+
+    tasks:
+
+    -   add_host: name={{ ansible_eth1['ipv4']['address'] }} groups=mysql_slave
+
+    -   name: Install libdbd-mysql-perl
+        apt: pkg=libdbd-mysql-perl state=latest install_recommends=no update_cache=yes
+        when: ansible_os_family == "Debian"
+
+#    -   name: Create replication user
+#        mysql_user: name=repl host=% password=ication priv="*.*:REPLICATION CLIENT,REPLICATION SLAVE" state=present
+
+
+
+    -   debug: msg="group {{ groups['mysql_master'] }}"
+
+    -   name: Get master coordinates
+        mysql_replication: mode=getmaster login_host={{ groups['mysql_master'][0] }} login_user=root login_password=pass
+        register: master_coords
+
+    -   debug: msg="master_host={{ groups['mysql_master'][0] }} master_log_file={{ master_coords.File }} master_log_pos={{ master_coords.Position }} master_user=repl master_password=ication"
+
+    -   name: Stop slave
+        mysql_replication: mode=stopslave
+
+    -   name: Change master to
+#        mysql_replication: mode=changemaster master_host={{ groups['mysql_master'][0] }} master_log_file={{ master_coords.File }} master_log_pos={{ master_coords.Position }} master_user=repl master_password=ication master_auto_position=1
+        mysql_replication: mode=changemaster master_host={{ groups['mysql_master'][0] }} master_user=repl master_password=ication master_auto_position=1
+    -   name: start slave
+        mysql_replication: mode=startslave
+
+    -   name: Create /root/.my.cnf from template
+        template: src=./templates/.my.cnf.j2 dest=/root/.my.cnf owner=root group=root mode=600
+
+    -   name: set read_only=1
+        command: mysql -e "set global read_only=1;"
+
+
+-   name: Setup ProxySQL
+    hosts: cmon
+    become: yes
+    remote_user: vagrant
+    gather_facts: true
+
+    tasks:
+
+#    -   name: Add Percona repository
+#        action: command apt-key adv --keyserver keys.gnupg.net --recv-keys 1C4CBDCDCD2EFD2A
+
+#    -   name: Get Ubuntu version
+#        shell: grep main /etc/apt/sources.list | grep -v \# | grep -v "\-security" | grep -v "\-updates" | awk '{print $3}' | uniq
+#        register: ubuntu_version
+
+#    -   name: Ensure deb entry is in place
+#        lineinfile: dest=/etc/apt/sources.list regexp='^deb http://repo.percona.com' line='deb http://repo.percona.com/apt {{ ubuntu_version['stdout_lines'][0] }} main'
+
+#    -   name: Ensure deb-src entry is in place
+#        lineinfile: dest=/etc/apt/sources.list regexp='^deb-src http://repo.percona.com' line='deb-src http://repo.percona.com/apt {{ ubuntu_version['stdout_lines'][0] }} main'
+
+    -   name: Install python-mysqldb
+        apt: pkg=python-mysqldb state=latest install_recommends=no
+
+#    -   name: Install ProxySQL
+#        apt: pkg=proxysql state=latest install_recommends=no update_cache=yes
+
+    -   name: Download ProxySQL
+        get_url: url=https://github.com/sysown/proxysql/releases/download/v1.2.4/proxysql_1.2.4-ubuntu14_amd64.deb dest=/root/proxysql_1.2.4-ubuntu14_amd64.deb mode=0660
+        register: getproxy
+
+    -   name: Install ProxySQL
+        apt: deb=/root/proxysql_1.2.4-ubuntu14_amd64.deb
+        when: getproxy.changed
+
+    -   name: Start ProxySQL
+        service: name=proxysql state=started
+        when: getproxy.changed
+
+    -   name: Wait for 6032 to become open
+        wait_for: port=6032 delay=1
+
+    -   name: proxysql | config | add server
+        proxysql_backend_servers:
+            login_user: "admin"
+            login_password: "admin"
+            hostgroup_id: 1
+            hostname: "{{ groups['mysql_slave'][0] }}"
+            port: "3306"
+            load_to_runtime: False
+            state: present
+        register: new_slave
+
+    -   name: proxysql | config | add server
+        proxysql_backend_servers:
+            login_user: "admin"
+            login_password: "admin"
+            hostgroup_id: 0
+            hostname: "{{ groups['mysql_master'][0] }}"
+            port: "3306"
+            load_to_runtime: False
+            state: present
+        register: new_master
+
+    -   name: proxysql | config | add replication hostgroups
+        proxysql_replication_hostgroups:
+            login_user: "admin"
+            login_password: "admin"
+            writer_hostgroup: 0
+            reader_hostgroup: 1
+            state: present
+
+
+    -   name: proxysql | config | manage monitor user password
+        proxysql_global_variables:
+            login_user: "admin"
+            login_password: "admin"
+            variable: "mysql-connect_timeout_server_max"
+            value: "30000"
+
+    -   name: proxysql | config | manage monitor user password
+        proxysql_global_variables:
+            login_user: "admin"
+            login_password: "admin"
+            variable: "mysql-query_retries_on_failure"
+            value: "1000"
+
+
+    -   name: proxysql | config | load servers to runtime
+        proxysql_manage_config:
+            login_user: "admin"
+            login_password: "admin"
+            action: LOAD
+            config_settings: "MYSQL SERVERS"
+            direction: TO
+            config_layer: RUNTIME
+        when: new_slave.changed or new_master.changed
+
+    -   name: proxysql | config | save servers to disk
+        proxysql_manage_config:
+            login_user: "admin"
+            login_password: "admin"
+            action: SAVE
+            config_settings: "MYSQL SERVERS"
+            direction: TO
+            config_layer: DISK
+        when: new_slave.changed or new_master.changed
+
+    -   name: proxysql | config | add users
+        proxysql_mysql_users:
+            login_user: "admin"
+            login_password: "admin"
+            username: "{{ item.usr }}"
+            password: "{{ item.pwd }}"
+            default_hostgroup: 0
+            state: present
+        with_items:
+            -   { usr: "sbtest", pwd: "sbtest" }
+
+    -   name: proxysql | config | manage rules
+        proxysql_query_rules:
+            login_user: "admin"
+            login_password: "admin"
+            rule_id: 10
+            active: True
+            match_digest: '^SELECT.*FOR UPDATE'
+            destination_hostgroup: 0
+            apply: True
+            load_to_runtime: False
+            state: present
+        register: rule1
+
+    -   name: proxysql | config | manage rules
+        proxysql_query_rules:
+            login_user: "admin"
+            login_password: "admin"
+            rule_id: 20
+            active: True
+            match_digest: '^SELECT'
+            destination_hostgroup: 1
+            apply: False
+            load_to_runtime: False
+            state: present
+        register: rule2
+
+    -   name: proxysql | config | manage rules
+        proxysql_query_rules:
+            login_user: "admin"
+            login_password: "admin"
+            rule_id: 30
+            active: True
+            match_digest: '.*@.*'
+            destination_hostgroup: 0
+            apply: True
+            load_to_runtime: False
+            state: present
+        register: rule3
+
+    -   name: proxysql | config | load query rules to runtime
+        proxysql_manage_config:
+            login_user: "admin"
+            login_password: "admin"
+            action: LOAD
+            config_settings: "MYSQL QUERY RULES"
+            direction: TO
+            config_layer: RUNTIME
+        when: rule1.changed or rule2.changed or rule3.changed
+
+    -   name: proxysql | config | save query rules to disk
+        proxysql_manage_config:
+            login_user: "admin"
+            login_password: "admin"
+            action: SAVE
+            config_settings: "MYSQL QUERY RULES"
+            direction: TO
+            config_layer: DISK
+        when: rule1.changed or rule2.changed or rule3.changed
+
+
+    -   name: proxysql | config | save query rules to disk
+        proxysql_manage_config:
+            login_user: "admin"
+            login_password: "admin"
+            action: LOAD
+            config_settings: "MYSQL VARIABLES"
+            direction: TO
+            config_layer: RUNTIME
+
+    -   name: proxysql | config | save query rules to disk
+        proxysql_manage_config:
+            login_user: "admin"
+            login_password: "admin"
+            action: SAVE
+            config_settings: "MYSQL VARIABLES"
+            direction: TO
+            config_layer: DISK
+
+
+-   name: Setup sysbench
+    hosts: cmon
+    become: yes
+    remote_user: vagrant
+    gather_facts: true
+
+    tasks:
+
+
+    -   name: Install git
+        apt: pkg=git state=latest install_recommends=no update_cache=no
+
+    -   name: Install automake
+        apt: pkg=automake state=latest install_recommends=no update_cache=no
+
+    -   name: Install libtool
+        apt: pkg=libtool state=latest install_recommends=no update_cache=no
+
+    -   name: Install make
+        apt: pkg=make state=latest install_recommends=no update_cache=no
+
+    -   name: Install libssl-dev
+        apt: pkg=libssl-dev state=latest install_recommends=no update_cache=no
+
+    -   name: Install libmysqlclient-dev
+        apt: pkg=libmysqlclient-dev state=latest install_recommends=no update_cache=no
+
+    -   name: Checkout sysbench
+        git: repo=https://github.com/akopytov/sysbench.git
+             dest=/root/sysbench
+        register: sysbench
+
+    -   name: Compile sysbench
+        shell: "{{ item }}"
+        args:
+            chdir: /root/sysbench
+        with_items:
+            -   ./autogen.sh
+            -   ./configure
+            -   make
+            -   make install
+        when: sysbench.changed
+
+    -   name: Provision sysbench data
+        shell: sysbench --test=/root/sysbench/sysbench/tests/db/oltp.lua --num-threads=2 --max-requests=0 --max-time=0 --mysql-host={{ item }} --mysql-user=sbtest --mysql-password=sbtest --mysql-port=6033 --oltp-tables-count=1 --report-interval=1 --oltp-skip-trx=on --oltp-table-size=50000 prepare
+        with_items: "{{ ansible_eth1['ipv4']['address'] }}"
+        when: sysbench.changed
+
+   # -   include: setup_mha.yml
+
+
+
+
+-   name: Configure MHA node
+
+    hosts: cmon, db
+    become: yes
+    remote_user: vagrant
+    gather_facts: false
+
+    tasks:
+
+    -   name: Install libdbd-mysql-perl
+        apt: pkg=libdbd-mysql-perl state=latest install_recommends=no update_cache=yes
+    -   name: Install git
+        apt: pkg=git state=latest install_recommends=no update_cache=no
+    -   name: Install make
+        apt: pkg=make state=latest install_recommends=no update_cache=no
+    -   name: Install libmodule-install-perl
+        apt: pkg=libmodule-install-perl state=latest install_recommends=no update_cache=no
+    -   name: Git checkout
+        git: repo=https://github.com/krzysztof-ksiazek/mha4mysql-node.git dest=/root/mha4mysql-node
+    -   name: Compile MHA node
+        shell: cd /root/mha4mysql-node && perl Makefile.PL && make && make install
+    -   name: Install python-mysqldb
+        apt: pkg=python-mysqldb state=latest install_recommends=no
+
+-   name: Add mha_mon user
+
+    hosts: master
+    become: yes
+    remote_user: vagrant
+    gather_facts: false
+
+    tasks:
+
+    -   name: Create user
+        mysql_user: name=mha_mon host=% password=pass priv="*.*:ALL,GRANT" login_password=pass login_user=root login_host=127.0.0.1 state=present
+
+-   name: Populate mha_nodes group
+
+    hosts: db
+    become: yes
+    remote_user: vagrant
+    gather_facts: true
+    serial: 1
+
+    tasks:
+
+    -   debug: msg="name={{ ansible_eth1['ipv4']['address'] }}"
+#    -   add_host: name={{ ec2_private_ip_address }} groups=mha_nodes
+#    -   add_host: name={{ ec2_private_dns_name }} groups=mha_nodes
+#    -   debug: msg="nodes {{ groups['mha_nodes'] }}"
+
+-   name: Populate mha_nodes group
+
+    hosts: db
+    become: yes
+    remote_user: vagrant
+    gather_facts: true
+    serial: 1
+
+    tasks:
+
+    -   add_host: name={{ ansible_eth1['ipv4']['address'] }} groups=mha_nodes
+    -   debug: msg="nodes {{ groups['mha_nodes'] }}"
+
+
+-   name: Configure MHA manager
+
+    hosts: cmon, db
+    become: yes
+    remote_user: vagrant
+    gather_facts: false
+
+    tasks:
+
+#    -   name: Setup /etc/hosts from template
+#        template: src=./templates/hosts.j2 dest=/etc/hosts owner=root group=root mode=0644
+    -   name: Install libdbd-mysql-perl
+        apt: pkg=libdbd-mysql-perl state=latest install_recommends=no update_cache=yes
+    -   name: Install git
+        apt: pkg=git state=latest install_recommends=no update_cache=no
+    -   name: Install make
+        apt: pkg=make state=latest install_recommends=no update_cache=no
+    -   name: Install libmodule-install-perl
+        apt: pkg=libmodule-install-perl state=latest install_recommends=no update_cache=no
+    -   name: Install libconfig-tiny-perl
+        apt: pkg=libconfig-tiny-perl state=latest install_recommends=no update_cache=no
+    -   name: Install liblog-dispatch-perl
+        apt: pkg=liblog-dispatch-perl state=latest install_recommends=no update_cache=no
+    -   name: Install libparallel-forkmanager-perl
+        apt: pkg=libparallel-forkmanager-perl state=latest install_recommends=no update_cache=no
+    -   name: Git checkout
+        git: repo=https://github.com/krzysztof-ksiazek/mha4mysql-manager.git dest=/root/mha4mysql-manager
+    -   name: Compile MHA manager
+        shell: cd /root/mha4mysql-manager && perl Makefile.PL && make && make install
+    -   name: Setup log directory
+        file: path=/var/log/masterha/app1/ state=directory
+    -   name: Setup switchover.sh from template
+        template: src=./templates/switchover.sh.j2 dest=/root/switchover.sh owner=root group=root mode=0755
+    -   name: Copy /root/mha4mysql-manager/samples/scripts/master_ip_online_change to /root
+        command: cp /root/mha4mysql-manager/samples/scripts/master_ip_online_change /root/master_ip_online_change
+    -   name: Remove FIXME_xxx_drop_app_user line from /root/master_ip_online_change
+        lineinfile: dest=/root/master_ip_online_change regexp=".*FIXME_xxx_drop_app_user.*" state=absent   
+    -   name: Remove FIXME_xxx_create_app_user line from /root/master_ip_online_change
+        lineinfile: dest=/root/master_ip_online_change regexp=".*FIXME_xxx_create_app_user.*" state=absent
+
+-   name: Create SSH key
+
+    hosts: cmon
+    remote_user: vagrant
+    become: yes
+    gather_facts: false
+
+    tasks:
+
+    -   name: Create SSH key
+        user: name=root generate_ssh_key=yes ssh_key_bits=2048
+    -   name: Fetch SSH pub key
+        fetch: src=/root/.ssh/id_rsa.pub dest=./templates/id_rsa.pub flat=yes
+    -   name: Fetch SSH priv key
+        fetch: src=/root/.ssh/id_rsa dest=./templates/id_rsa flat=yes
+
+
+
+-   name: Setup SSH keys
+
+    hosts: cmon, db
+    become: yes
+    remote_user: vagrant
+    gather_facts: false
+
+    tasks:
+
+    -   name: Clear authorized_keys
+        shell: rm -f /root/.ssh/authorized_keys
+    -   name: Setup SSH key on hosts
+        authorized_key: user=root key="{{ lookup('file', './templates/id_rsa.pub') }}"
+    -   name: Copy SSH priv key
+        copy: src=./templates/id_rsa dest=/root/.ssh/id_rsa owner=root group=root mode=0600
+
+
+-   name: Setup MHA configuration
+    hosts: cmon, db
+    become: yes
+    remote_user: vagrant
+    gather_facts: false
+
+
+    tasks:
+#   - debug: msg="nodes {{ groups['mha_nodes'] }}"
+    -   name: Setup config from template
+        template: src=./templates/masterha.j2 dest=/etc/app1.cnf owner=root group=root mode=0644
+
+    -   name: Install daemontools
+        apt: pkg=daemontools state=latest install_recommends=no update_cache=no
+
+    -   name: Create services for svc
+        file: path=/service/masterha_app1/ state=directory
+    -   template: src=./templates/run.j2 dest=/service/masterha_app1/run owner=root group=root mode=0755
